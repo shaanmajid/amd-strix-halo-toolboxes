@@ -47,7 +47,9 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     permissions:
+      attestations: write
       contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -81,6 +83,7 @@ jobs:
         run: echo "BUILD_TS=$(date +%Y%m%dT%H%M%S)" >> $GITHUB_ENV
 
       - name: Build & push ${{ matrix.backend }}
+        id: publish
         working-directory: toolboxes
         shell: bash
         env:
@@ -110,3 +113,16 @@ jobs:
           echo "→ Tag & push channel → ${CHN}"
           docker tag "${IMM}" "${CHN}"
           docker push "${CHN}"
+
+          DIGEST="$(docker buildx imagetools inspect "${IMM}" --format '{{ .Manifest.Digest }}')"
+          {
+            echo "image_name=${DOCKERHUB_REPO}"
+            echo "image_digest=${DIGEST}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest ${{ matrix.backend }} image provenance
+        uses: actions/attest@281a49d4cbb0a72c9575a50d18f6deb515a11deb # v4
+        with:
+          subject-name: ${{ steps.publish.outputs.image_name }}
+          subject-digest: ${{ steps.publish.outputs.image_digest }}
+          push-to-registry: true
