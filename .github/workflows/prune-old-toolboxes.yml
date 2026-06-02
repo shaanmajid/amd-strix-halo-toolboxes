@@ -14,8 +14,19 @@ on:
     types: [completed]   # runs after success/failure/cancel
     branches: [main]     
 
+permissions: {}
+
 jobs:
   prune:
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          github.event.workflow_run.head_branch == github.event.repository.default_branch
+        )
+      }}
     runs-on: ubuntu-latest
     env:
       NS: kyuz0
@@ -30,8 +41,10 @@ jobs:
           DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
           DH_PASS: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
+          payload=$(jq -nc --arg username "$DH_USER" --arg password "$DH_PASS" \
+            '{username:$username,password:$password}')
           TOKEN=$(curl -s -H "Content-Type: application/json" \
-            -d "{\"username\":\"${DH_USER}\",\"password\":\"${DH_PASS}\"}" \
+            -d "$payload" \
             https://hub.docker.com/v2/users/login/ | jq -r .token)
           if [[ -z "$TOKEN" || "$TOKEN" == "null" ]]; then
             echo "Failed to get Docker Hub JWT"; exit 1
@@ -41,22 +54,32 @@ jobs:
       - name: Determine backend list
         id: mk
         shell: bash
+        env:
+          BACKENDS_INPUT: ${{ github.event.inputs.backends || 'all' }}
         run: |
-          IN='${{ github.event.inputs.backends }}'
+          ALL_BACKENDS='["rocm-6.4.2","rocm-6.4.3","rocm-6.4.4","rocm-7.1.1","rocm-7.2","rocm-7.2.1","rocm-7.2.1-pr21344","rocm-7.2.2","rocm-7.2.3","rocm-7.2.3-mtp","rocm-7beta","rocm7-nightlies","vulkan-amdvlk","vulkan-radv","vulkan-radv-mtp"]'
+          IN=$(tr -d '[:space:]' <<< "$BACKENDS_INPUT")
+
           if [[ "$IN" == "all" || -z "$IN" ]]; then
-            JSON='["rocm-6.4.2","rocm-6.4.3","rocm-6.4.4","rocm-7.1.1","rocm-7.2","rocm-7.2.1","rocm-7.2.1-pr21344","rocm-7.2.2","rocm-7.2.3","rocm-7.2.3-mtp","rocm-7beta","rocm7-nightlies","vulkan-amdvlk","vulkan-radv","vulkan-radv-mtp"]'
+            JSON="$ALL_BACKENDS"
           else
-            IN_CLEAN=$(echo "$IN" | tr -d '[:space:]')
-            JSON='["'${IN_CLEAN//,/\",\"}'"]'
+            if ! [[ "$IN" =~ ^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$ ]]; then
+              echo "backends must be 'all' or a comma-separated list using letters, digits, dots, underscores, and hyphens"; exit 1
+            fi
+            JSON=$(jq -cn --arg input "$IN" '$input | split(",")')
           fi
           echo "list=${JSON}" >> "$GITHUB_OUTPUT"
 
       - name: Prune old tags
         env:
           TOKEN: ${{ steps.login.outputs.token }}
-          KEEP: ${{ github.event.inputs.keep }}
+          KEEP: ${{ github.event.inputs.keep || '3' }}
+          BACKENDS: ${{ steps.mk.outputs.list }}
         run: |
-          BACKENDS='${{ steps.mk.outputs.list }}'
+          if ! [[ "$KEEP" =~ ^[0-9]+$ ]] || (( KEEP < 1 || KEEP > 100 )); then
+            echo "keep must be an integer from 1 to 100"; exit 1
+          fi
+
           mapfile -t ARR < <(jq -r '.[]' <<< "$BACKENDS")
           base_url="https://hub.docker.com/v2/repositories/${NS}/${REPO}/tags"
           auth_hdr="Authorization: JWT ${TOKEN}"
@@ -68,7 +91,7 @@ jobs:
             tags=()
             while [[ -n "$next" && "$next" != "null" ]]; do
               resp=$(curl -s -H "$auth_hdr" "$next")
-              page_tags=($(jq -r '.results[].name' <<< "$resp" | grep -E "^${B}_" || true))
+              mapfile -t page_tags < <(jq -r --arg prefix "${B}_" '.results[].name | select(startswith($prefix))' <<< "$resp")
               tags+=("${page_tags[@]}")
               next=$(jq -r '.next' <<< "$resp")
             done
