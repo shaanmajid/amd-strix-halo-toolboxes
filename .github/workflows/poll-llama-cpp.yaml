@@ -13,7 +13,9 @@ jobs:
   poll-and-trigger:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - id: fetch
         shell: bash
@@ -54,12 +56,15 @@ jobs:
 
       - id: compare
         shell: bash
+        env:
+          LATEST_SHA: ${{ steps.fetch.outputs.latest_sha }}
+          PREVIOUS_SHA: ${{ steps.previous.outputs.previous_sha }}
         run: |
           set -euo pipefail
           echo "🧮 Comparing SHAs…"
-          echo "prev: ${{ steps.previous.outputs.previous_sha }}"
-          echo "curr: ${{ steps.fetch.outputs.latest_sha }}"
-          if [[ "${{ steps.fetch.outputs.latest_sha }}" != "${{ steps.previous.outputs.previous_sha }}" ]]; then
+          echo "prev: ${PREVIOUS_SHA}"
+          echo "curr: ${LATEST_SHA}"
+          if [[ "${LATEST_SHA}" != "${PREVIOUS_SHA}" ]]; then
             echo "🔁 New commit detected"
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
@@ -70,6 +75,7 @@ jobs:
       - name: Trigger build_and_publish.yml on main
         if: steps.compare.outputs.changed == 'true'
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
@@ -82,7 +88,7 @@ jobs:
                  -H "Accept: application/vnd.github+json" \
                  -H "Authorization: Bearer $GH_TOKEN" \
                  -d "{\"ref\":\"$REF\",\"inputs\":{\"backends\":\"all\"}}" \
-                 "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$WF/dispatches")
+                 "https://api.github.com/repos/${GH_REPO}/actions/workflows/$WF/dispatches")
           echo "HTTP $CODE"
           if [[ "$CODE" != "204" ]]; then echo "Response:"; cat /tmp/resp; exit 1; fi
           
@@ -90,15 +96,17 @@ jobs:
       - name: Save new SHA
         if: steps.compare.outputs.changed == 'true'
         shell: bash
+        env:
+          LATEST_SHA: ${{ steps.fetch.outputs.latest_sha }}
         run: |
           set -euo pipefail
-          printf "%s" "${{ steps.fetch.outputs.latest_sha }}" > last_commit_sha
+          printf "%s" "${LATEST_SHA}" > last_commit_sha
           echo "💾 Saved $(wc -c < last_commit_sha) bytes to $(pwd)/last_commit_sha"
           ls -la last_commit_sha
 
       - name: Upload last-SHA artifact
         if: steps.compare.outputs.changed == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: last-llama-sha
           path: last_commit_sha
